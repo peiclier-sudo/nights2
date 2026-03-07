@@ -10,15 +10,15 @@ from src.utils.config import TEMP_DIR
 
 logger = logging.getLogger(__name__)
 
-# Best French voices on Edge TTS (natural sounding)
-FRENCH_VOICES = {
-    "vivienne": "fr-FR-VivienneMultilingualNeural",  # Female, very natural
-    "denise": "fr-FR-DeniseNeural",                   # Female, warm
-    "henri": "fr-FR-HenriNeural",                     # Male, clear
-    "remy": "fr-FR-RemyMultilingualNeural",           # Male, modern
+# Best English voices on Edge TTS (natural sounding)
+VOICES = {
+    "andrew": "en-US-AndrewMultilingualNeural",   # Male, natural & modern
+    "ava": "en-US-AvaMultilingualNeural",         # Female, very natural
+    "brian": "en-US-BrianMultilingualNeural",     # Male, warm & engaging
+    "emma": "en-US-EmmaMultilingualNeural",       # Female, clear & friendly
 }
 
-DEFAULT_VOICE = "vivienne"
+DEFAULT_VOICE = "andrew"
 
 
 async def _generate_speech(
@@ -67,13 +67,13 @@ def generate_voiceover_for_slides(
 
     Args:
         slide_texts: List of text for each slide.
-        voice_name: Voice key from FRENCH_VOICES dict.
+        voice_name: Voice key from VOICES dict.
         rate: Speed adjustment (e.g., "+10%", "-5%").
 
     Returns:
         List of dicts with 'audio_path', 'duration', and 'subtitles' per slide.
     """
-    voice = FRENCH_VOICES.get(voice_name, FRENCH_VOICES[DEFAULT_VOICE])
+    voice = VOICES.get(voice_name, VOICES[DEFAULT_VOICE])
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
     logger.info("Generating voiceover with voice: %s (%s)", voice_name, voice)
@@ -109,4 +109,4 @@ def generate_voiceover_for_slides(
 
 def list_voices() -> dict[str, str]:
     """Return available voice options."""
-    return FRENCH_VOICES.copy()
+    return VOICES.copy()
