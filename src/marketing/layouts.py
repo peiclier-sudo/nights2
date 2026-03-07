@@ -2,9 +2,18 @@
 
 import logging
 import textwrap
-from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
 from src.utils.config import FONTS_DIR, DEFAULT_FONT_FILE
+from src.marketing.effects import (
+    drop_shadow,
+    gradient_background,
+    glow_rect,
+    text_with_shadow,
+    reflection,
+    lighten,
+    darken,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +35,7 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 def _fit_image(img: Image.Image, max_w: int, max_h: int) -> Image.Image:
     """Resize image to fit within bounds, preserving aspect ratio."""
     ratio = min(max_w / img.width, max_h / img.height)
-    new_size = (int(img.width * ratio), int(img.height * ratio))
+    new_size = (max(1, int(img.width * ratio)), max(1, int(img.height * ratio)))
     return img.resize(new_size, Image.Resampling.LANCZOS)
 
 
@@ -40,23 +49,20 @@ def _paste_centered(canvas: Image.Image, img: Image.Image, x: int, y: int):
         canvas.paste(img, (px, py))
 
 
-def _draw_text_block(
-    draw: ImageDraw.Draw,
-    text: str,
-    position: tuple,
-    font: ImageFont.FreeTypeFont,
-    color: tuple,
-    max_width: int = 20,
-    anchor: str = "mm",
-    align: str = "center",
-):
-    """Draw wrapped text at position."""
-    wrapped = textwrap.fill(text, width=max_width)
-    draw.multiline_text(position, wrapped, font=font, fill=color, anchor=anchor, align=align)
+def _wrap(text: str, max_width: int = 20) -> str:
+    return textwrap.fill(text, width=max_width)
+
+
+def _cta_bbox(draw, cta, font, cx, cy, pad_x=40, pad_y=18):
+    """Calculate CTA button bounding box centered at (cx, cy)."""
+    bbox = draw.textbbox((0, 0), cta, font=font)
+    bw = bbox[2] - bbox[0] + pad_x * 2
+    bh = bbox[3] - bbox[1] + pad_y * 2
+    return (cx - bw // 2, cy - bh // 2, cx + bw // 2, cy + bh // 2)
 
 
 # ---------------------------------------------------------------------------
-# Layout templates
+# Layout templates — each uses effects for professional output
 # ---------------------------------------------------------------------------
 
 def layout_centered(
@@ -67,37 +73,43 @@ def layout_centered(
     tagline: str,
     cta: str,
 ) -> Image.Image:
-    """Product centered, logo top-left, tagline above product, CTA below."""
+    """Product centered with drop shadow, gradient bg, glowing CTA."""
     w, h = canvas_size
-    canvas = Image.new("RGBA", canvas_size, (*palette["bg_light"], 255))
+
+    # Gradient background (light brand color → white)
+    canvas = gradient_background(
+        canvas_size,
+        lighten(palette["primary"], 0.85),
+        (255, 255, 255),
+    )
     draw = ImageDraw.Draw(canvas)
 
     # Accent bar at top
-    draw.rectangle([0, 0, w, 8], fill=(*palette["primary"], 255))
+    draw.rectangle([0, 0, w, 6], fill=(*palette["primary"], 255))
 
     # Logo top-left
     logo_fit = _fit_image(logo, w // 5, h // 8)
-    _paste_centered(canvas, logo_fit, 30 + logo_fit.width // 2, 50 + logo_fit.height // 2)
+    _paste_centered(canvas, logo_fit, 40 + logo_fit.width // 2, 50 + logo_fit.height // 2)
 
-    # Product centered
-    product_fit = _fit_image(product, int(w * 0.6), int(h * 0.45))
-    _paste_centered(canvas, product_fit, w // 2, h // 2)
+    # Product with drop shadow, centered
+    product_fit = _fit_image(product, int(w * 0.55), int(h * 0.4))
+    product_shadowed = drop_shadow(product_fit, offset=(6, 8), blur_radius=18, shadow_color=(0, 0, 0, 60))
+    _paste_centered(canvas, product_shadowed, w // 2, int(h * 0.48))
 
-    # Tagline above product
-    font_tag = _load_font(max(36, w // 20))
-    _draw_text_block(draw, tagline, (w // 2, int(h * 0.15)), font_tag, (*palette["text_dark"], 255))
-
-    # CTA button below product
-    font_cta = _load_font(max(28, w // 28))
-    cta_y = int(h * 0.82)
-    bbox = draw.textbbox((0, 0), cta, font=font_cta)
-    cta_w = bbox[2] - bbox[0] + 60
-    cta_h = bbox[3] - bbox[1] + 30
-    draw.rounded_rectangle(
-        [w // 2 - cta_w // 2, cta_y - cta_h // 2, w // 2 + cta_w // 2, cta_y + cta_h // 2],
-        radius=cta_h // 2,
-        fill=(*palette["primary"], 255),
+    # Tagline with subtle shadow
+    font_tag = _load_font(max(38, w // 18))
+    text_with_shadow(
+        draw, (w // 2, int(h * 0.13)),
+        _wrap(tagline), font_tag,
+        fill=(*palette["text_dark"], 255),
+        shadow_color=(0, 0, 0, 30), shadow_offset=(1, 2),
     )
+
+    # Glowing CTA button
+    font_cta = _load_font(max(28, w // 28))
+    cta_y = int(h * 0.84)
+    btn = _cta_bbox(draw, cta, font_cta, w // 2, cta_y)
+    glow_rect(draw, canvas, btn, (*palette["primary"], 255), radius=btn[3] - btn[1])
     draw.text((w // 2, cta_y), cta, font=font_cta, fill=(*palette["text_on_primary"], 255), anchor="mm")
 
     return canvas
@@ -111,40 +123,49 @@ def layout_split(
     tagline: str,
     cta: str,
 ) -> Image.Image:
-    """Product on left half, text on right half with brand color background."""
+    """Product left with reflection, gradient brand panel right."""
     w, h = canvas_size
-    canvas = Image.new("RGBA", canvas_size, (*palette["bg_light"], 255))
+
+    # Left side: soft neutral gradient
+    canvas = gradient_background(canvas_size, (250, 250, 250), (235, 235, 240))
     draw = ImageDraw.Draw(canvas)
 
-    # Right half colored background
-    draw.rectangle([w // 2, 0, w, h], fill=(*palette["primary"], 255))
+    # Right panel: brand gradient
+    right_panel = gradient_background(
+        (w // 2, h),
+        palette["primary"],
+        darken(palette["primary"], 0.25),
+    )
+    canvas.paste(right_panel, (w // 2, 0))
+    draw = ImageDraw.Draw(canvas)
 
-    # Product on left
-    product_fit = _fit_image(product, int(w * 0.42), int(h * 0.7))
-    _paste_centered(canvas, product_fit, w // 4, h // 2)
+    # Product on left with drop shadow
+    product_fit = _fit_image(product, int(w * 0.38), int(h * 0.55))
+    product_shadowed = drop_shadow(product_fit, offset=(5, 6), blur_radius=14, shadow_color=(0, 0, 0, 50))
+    _paste_centered(canvas, product_shadowed, int(w * 0.26), int(h * 0.45))
 
-    # Logo top-right
+    # Logo top-right on brand panel
     logo_fit = _fit_image(logo, w // 6, h // 8)
     _paste_centered(canvas, logo_fit, int(w * 0.75), 50 + logo_fit.height // 2)
 
-    # Tagline on right
-    font_tag = _load_font(max(32, w // 22))
-    _draw_text_block(
-        draw, tagline, (int(w * 0.75), int(h * 0.45)),
-        font_tag, (*palette["text_on_primary"], 255), max_width=14,
+    # Tagline on right with shadow for readability
+    font_tag = _load_font(max(34, w // 20))
+    text_with_shadow(
+        draw, (int(w * 0.75), int(h * 0.43)),
+        _wrap(tagline, 14), font_tag,
+        fill=(255, 255, 255, 255),
+        shadow_color=(0, 0, 0, 60),
     )
 
-    # CTA on right
+    # CTA button (white on brand)
     font_cta = _load_font(max(26, w // 30))
     cta_y = int(h * 0.72)
-    bbox = draw.textbbox((0, 0), cta, font=font_cta)
-    cta_w = bbox[2] - bbox[0] + 50
-    cta_h = bbox[3] - bbox[1] + 24
-    draw.rounded_rectangle(
-        [int(w * 0.75) - cta_w // 2, cta_y - cta_h // 2,
-         int(w * 0.75) + cta_w // 2, cta_y + cta_h // 2],
-        radius=cta_h // 2,
-        fill=(*palette["bg_light"], 255),
+    btn = _cta_bbox(draw, cta, font_cta, int(w * 0.75), cta_y, pad_x=32, pad_y=14)
+    glow_rect(
+        draw, canvas, btn,
+        (255, 255, 255, 240),
+        glow_color=(*lighten(palette["primary"], 0.3), 60),
+        radius=(btn[3] - btn[1]),
     )
     draw.text(
         (int(w * 0.75), cta_y), cta, font=font_cta,
@@ -162,37 +183,50 @@ def layout_hero(
     tagline: str,
     cta: str,
 ) -> Image.Image:
-    """Full-bleed product background with dark overlay, logo + text on top."""
+    """Full-bleed product bg, blurred + overlaid, bold text + glowing CTA."""
     w, h = canvas_size
-    # Product as full background
-    bg = product.convert("RGBA").resize(canvas_size, Image.Resampling.LANCZOS)
 
-    # Dark overlay
-    overlay = Image.new("RGBA", canvas_size, (0, 0, 0, 140))
+    # Product as full background, blurred
+    bg = product.convert("RGBA").resize(canvas_size, Image.Resampling.LANCZOS)
+    bg = bg.filter(ImageFilter.GaussianBlur(6))
+
+    # Gradient overlay (brand-tinted dark)
+    overlay = gradient_background(
+        canvas_size,
+        (*darken(palette["primary"], 0.7), 180),
+        (0, 0, 0, 200),
+        direction="vertical",
+    )
+    # Manual alpha composite since overlay has per-pixel alpha
     canvas = Image.alpha_composite(bg, overlay)
     draw = ImageDraw.Draw(canvas)
 
-    # Color accent line at bottom
-    draw.rectangle([0, h - 6, w, h], fill=(*palette["accent"], 255))
+    # Accent line bottom
+    draw.rectangle([0, h - 5, w, h], fill=(*palette["accent"], 255))
 
     # Logo top-center
     logo_fit = _fit_image(logo, w // 4, h // 7)
-    _paste_centered(canvas, logo_fit, w // 2, int(h * 0.12))
+    _paste_centered(canvas, logo_fit, w // 2, int(h * 0.1))
 
-    # Big tagline center
-    font_tag = _load_font(max(42, w // 16))
-    _draw_text_block(draw, tagline, (w // 2, int(h * 0.48)), font_tag, (255, 255, 255, 255))
+    # Big tagline center with strong shadow
+    font_tag = _load_font(max(46, w // 14))
+    text_with_shadow(
+        draw, (w // 2, int(h * 0.45)),
+        _wrap(tagline, 16), font_tag,
+        fill=(255, 255, 255, 255),
+        shadow_color=(0, 0, 0, 150), shadow_offset=(3, 3),
+    )
 
-    # CTA
-    font_cta = _load_font(max(30, w // 26))
-    cta_y = int(h * 0.78)
-    bbox = draw.textbbox((0, 0), cta, font=font_cta)
-    cta_w = bbox[2] - bbox[0] + 60
-    cta_h = bbox[3] - bbox[1] + 30
-    draw.rounded_rectangle(
-        [w // 2 - cta_w // 2, cta_y - cta_h // 2, w // 2 + cta_w // 2, cta_y + cta_h // 2],
-        radius=cta_h // 2,
-        fill=(*palette["accent"], 255),
+    # Glowing accent CTA
+    font_cta = _load_font(max(30, w // 24))
+    cta_y = int(h * 0.76)
+    btn = _cta_bbox(draw, cta, font_cta, w // 2, cta_y)
+    glow_rect(
+        draw, canvas, btn,
+        (*palette["accent"], 255),
+        glow_color=(*palette["accent"], 100),
+        radius=(btn[3] - btn[1]),
+        glow_radius=16,
     )
     draw.text((w // 2, cta_y), cta, font=font_cta, fill=(255, 255, 255, 255), anchor="mm")
 
@@ -207,28 +241,43 @@ def layout_minimal(
     tagline: str,
     cta: str,
 ) -> Image.Image:
-    """Clean minimal — white background, small product, big bold tagline."""
+    """Clean minimal — white bg, product with reflection, elegant typography."""
     w, h = canvas_size
     canvas = Image.new("RGBA", canvas_size, (255, 255, 255, 255))
     draw = ImageDraw.Draw(canvas)
 
-    # Product small, upper area
-    product_fit = _fit_image(product, int(w * 0.35), int(h * 0.35))
-    _paste_centered(canvas, product_fit, w // 2, int(h * 0.3))
+    # Subtle top accent line
+    draw.rectangle([int(w * 0.3), 0, int(w * 0.7), 3], fill=(*palette["primary"], 180))
 
-    # Bold tagline below product
-    font_tag = _load_font(max(40, w // 18))
-    _draw_text_block(draw, tagline, (w // 2, int(h * 0.6)), font_tag, (*palette["text_dark"], 255))
+    # Product with reflection
+    product_fit = _fit_image(product, int(w * 0.35), int(h * 0.3))
+    product_reflected = reflection(product_fit, height_ratio=0.25, start_opacity=50)
+    _paste_centered(canvas, product_reflected, w // 2, int(h * 0.3))
 
-    # CTA as underlined text
-    font_cta = _load_font(max(24, w // 32))
+    # Bold tagline below
+    font_tag = _load_font(max(42, w // 16))
+    text_with_shadow(
+        draw, (w // 2, int(h * 0.6)),
+        _wrap(tagline), font_tag,
+        fill=(*palette["text_dark"], 255),
+        shadow_color=(0, 0, 0, 15), shadow_offset=(1, 1),
+    )
+
+    # CTA as accent-colored text (no button, minimal style)
+    font_cta = _load_font(max(26, w // 30))
     draw.text(
-        (w // 2, int(h * 0.78)), cta, font=font_cta,
+        (w // 2, int(h * 0.76)), cta, font=font_cta,
         fill=(*palette["primary"], 255), anchor="mm",
+    )
+    # Underline
+    cta_bbox = draw.textbbox((w // 2, int(h * 0.76)), cta, font=font_cta, anchor="mm")
+    draw.line(
+        [cta_bbox[0], cta_bbox[3] + 4, cta_bbox[2], cta_bbox[3] + 4],
+        fill=(*palette["primary"], 120), width=2,
     )
 
     # Logo bottom-center
-    logo_fit = _fit_image(logo, w // 6, h // 10)
+    logo_fit = _fit_image(logo, w // 7, h // 12)
     _paste_centered(canvas, logo_fit, w // 2, int(h * 0.92))
 
     return canvas
@@ -242,39 +291,52 @@ def layout_dark(
     tagline: str,
     cta: str,
 ) -> Image.Image:
-    """Dark premium feel — dark background, glowing accent highlights."""
+    """Premium dark — gradient bg, glowing product shadow, neon-style CTA."""
     w, h = canvas_size
-    canvas = Image.new("RGBA", canvas_size, (*palette["bg_dark"], 255))
+
+    # Dark gradient background
+    canvas = gradient_background(
+        canvas_size,
+        palette["bg_dark"],
+        darken(palette["bg_dark"], 0.4),
+        direction="diagonal",
+    )
     draw = ImageDraw.Draw(canvas)
 
     # Accent stripe
-    draw.rectangle([0, int(h * 0.02), w, int(h * 0.025)], fill=(*palette["accent"], 255))
+    draw.rectangle([0, int(h * 0.018), w, int(h * 0.023)], fill=(*palette["accent"], 200))
 
     # Logo top-right
     logo_fit = _fit_image(logo, w // 5, h // 8)
-    _paste_centered(canvas, logo_fit, w - 30 - logo_fit.width // 2, 50 + logo_fit.height // 2)
+    _paste_centered(canvas, logo_fit, w - 40 - logo_fit.width // 2, 50 + logo_fit.height // 2)
 
-    # Product center-left
-    product_fit = _fit_image(product, int(w * 0.45), int(h * 0.5))
-    _paste_centered(canvas, product_fit, int(w * 0.35), int(h * 0.48))
+    # Product with colored glow shadow
+    product_fit = _fit_image(product, int(w * 0.42), int(h * 0.45))
+    product_shadowed = drop_shadow(
+        product_fit, offset=(0, 4), blur_radius=25,
+        shadow_color=(*palette["accent"], 70),
+    )
+    _paste_centered(canvas, product_shadowed, int(w * 0.34), int(h * 0.48))
 
-    # Tagline right side
-    font_tag = _load_font(max(34, w // 22))
-    _draw_text_block(
-        draw, tagline, (int(w * 0.78), int(h * 0.4)),
-        font_tag, (*palette["text_light"], 255), max_width=12,
+    # Tagline right side with glow effect
+    font_tag = _load_font(max(36, w // 20))
+    text_with_shadow(
+        draw, (int(w * 0.76), int(h * 0.38)),
+        _wrap(tagline, 12), font_tag,
+        fill=(255, 255, 255, 255),
+        shadow_color=(*palette["accent"], 40), shadow_offset=(0, 2),
     )
 
-    # CTA bottom center
-    font_cta = _load_font(max(28, w // 28))
+    # Glowing neon-style CTA
+    font_cta = _load_font(max(28, w // 26))
     cta_y = int(h * 0.85)
-    bbox = draw.textbbox((0, 0), cta, font=font_cta)
-    cta_w = bbox[2] - bbox[0] + 60
-    cta_h = bbox[3] - bbox[1] + 28
-    draw.rounded_rectangle(
-        [w // 2 - cta_w // 2, cta_y - cta_h // 2, w // 2 + cta_w // 2, cta_y + cta_h // 2],
-        radius=cta_h // 2,
-        fill=(*palette["accent"], 255),
+    btn = _cta_bbox(draw, cta, font_cta, w // 2, cta_y)
+    glow_rect(
+        draw, canvas, btn,
+        (*palette["accent"], 255),
+        glow_color=(*palette["accent"], 120),
+        radius=(btn[3] - btn[1]),
+        glow_radius=20,
     )
     draw.text((w // 2, cta_y), cta, font=font_cta, fill=(255, 255, 255, 255), anchor="mm")
 
