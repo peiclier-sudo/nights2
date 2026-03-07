@@ -34,3 +34,7 @@ IMAGE_SOURCES = ["pexels", "pixabay"]
 # Font settings
 DEFAULT_FONT_SIZE = 72
 DEFAULT_FONT_FILE = "Roboto-Bold.ttf"
+
+# Voice settings (edge-tts, 100% free)
+DEFAULT_VOICE = "vivienne"  # Options: vivienne, denise, henri, remy
+VOICE_RATE = "+0%"  # Speed: "-10%" slower, "+10%" faster
