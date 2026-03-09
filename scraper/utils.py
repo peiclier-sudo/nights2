@@ -28,6 +28,85 @@ HEADERS_BASE = {
     "DNT": "1",
 }
 
+# Selenium driver singleton
+_driver = None
+
+
+def get_selenium_driver():
+    """Get or create a Selenium Chrome driver (headless)."""
+    global _driver
+    if _driver is not None:
+        try:
+            _driver.current_url  # check if still alive
+            return _driver
+        except Exception:
+            _driver = None
+
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.chrome.options import Options
+        from webdriver_manager.chrome import ChromeDriverManager
+
+        options = Options()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--lang=fr-FR")
+        options.add_argument(
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+
+        service = Service(ChromeDriverManager().install())
+        _driver = webdriver.Chrome(service=service, options=options)
+
+        # Remove webdriver flag
+        _driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
+        )
+        _driver.set_page_load_timeout(20)
+
+        logger.info("Selenium Chrome driver initialized")
+        return _driver
+    except Exception as e:
+        logger.error(f"Failed to initialize Selenium driver: {e}")
+        return None
+
+
+def fetch_page_selenium(url, wait_seconds=3):
+    """Fetch a page using Selenium (for anti-bot protected sites)."""
+    driver = get_selenium_driver()
+    if not driver:
+        return None
+
+    try:
+        driver.get(url)
+        time.sleep(wait_seconds)  # wait for JS rendering + anti-bot checks
+        html = driver.page_source
+        if html and len(html) > 500:
+            return html
+        return None
+    except Exception as e:
+        logger.debug(f"Selenium fetch failed for {url}: {e}")
+        return None
+
+
+def close_selenium_driver():
+    """Close the Selenium driver."""
+    global _driver
+    if _driver:
+        try:
+            _driver.quit()
+        except Exception:
+            pass
+        _driver = None
+
 
 def get_headers():
     """Return headers with a random user agent."""

@@ -38,7 +38,7 @@ from scraper.annuaire_scraper import search_118712, search_horaires_douverture
 from scraper.email_hunter import hunt_emails_on_website, verify_email_domain
 from scraper.utils import (
     extract_emails_from_html, fetch_page, random_delay,
-    get_domain, is_valid_company_url,
+    get_domain, is_valid_company_url, close_selenium_driver,
 )
 
 # Logging setup
@@ -461,7 +461,10 @@ def main():
     config = load_config()
 
     scraper = NettoyageScraper(config, args)
-    scraper.run()
+    try:
+        scraper.run()
+    finally:
+        close_selenium_driver()
 
 
 if __name__ == "__main__":
