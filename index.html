@@ -1,0 +1,1066 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Crystal Cascade</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; touch-action: none; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.87.0/dist/phaser.min.js"></script>
+<script>
+// ============================================================
+// CRYSTAL CASCADE - Suika/Watermelon Game 2.0
+// Complete single-file HTML5 game with Phaser 3 + Matter.js
+// ============================================================
+
+const GAME_W = 800;
+const GAME_H = 1200;
+const DROP_ZONE_Y = GAME_H * 0.15;
+const WALL_THICKNESS = 40;
+const FLOOR_Y = GAME_H - 60;
+
+// Crystal sizes: 1 through 10
+const CRYSTAL_SIZES = 10;
+const BASE_RADIUS = 18;
+const SCALE_FACTOR = 1.22;
+
+// Colors for each crystal size (gradient centers)
+const CRYSTAL_COLORS = [
+    0x4488ff, // 1 - Blue
+    0x8844ff, // 2 - Purple
+    0x44ff88, // 3 - Green
+    0xffdd44, // 4 - Yellow
+    0xff8844, // 5 - Orange
+    0xff4488, // 6 - Pink
+    0xff4444, // 7 - Red
+    0x44ffff, // 8 - Cyan
+    0xffffff, // 9 - White
+    0xffaaff, // 10 - Rainbow/Mega
+];
+
+const CRYSTAL_NAMES = [
+    'Shard', 'Chip', 'Fragment', 'Gem', 'Crystal',
+    'Prism', 'Jewel', 'Diamond', 'Star', 'MEGA'
+];
+
+function getCrystalRadius(size) {
+    return BASE_RADIUS * Math.pow(SCALE_FACTOR, size - 1);
+}
+
+function hexToRgb(hex) {
+    return {
+        r: (hex >> 16) & 0xff,
+        g: (hex >> 8) & 0xff,
+        b: hex & 0xff
+    };
+}
+
+// ============================================================
+// PROCEDURAL AUDIO (Web Audio API)
+// ============================================================
+class SoundManager {
+    constructor() {
+        this.ctx = null;
+        this.initialized = false;
+    }
+
+    init() {
+        if (this.initialized) return;
+        try {
+            this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+            this.initialized = true;
+        } catch (e) {
+            console.log('Web Audio not available');
+        }
+    }
+
+    playMergePing(size) {
+        if (!this.ctx) return;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        // Higher pitch for bigger merges
+        osc.frequency.value = 300 + size * 80;
+        osc.type = 'sine';
+        gain.gain.setValueAtTime(0.15, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.3);
+        osc.start();
+        osc.stop(this.ctx.currentTime + 0.3);
+    }
+
+    playExplosion(intensity) {
+        if (!this.ctx) return;
+        const bufferSize = this.ctx.sampleRate * 0.3;
+        const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+            data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 2);
+        }
+        const source = this.ctx.createBufferSource();
+        const gain = this.ctx.createGain();
+        source.buffer = buffer;
+        source.connect(gain);
+        gain.connect(this.ctx.destination);
+        gain.gain.setValueAtTime(0.08 * intensity, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.3);
+        source.start();
+    }
+
+    playDrop() {
+        if (!this.ctx) return;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.frequency.setValueAtTime(500, this.ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(200, this.ctx.currentTime + 0.15);
+        osc.type = 'sine';
+        gain.gain.setValueAtTime(0.08, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.15);
+        osc.start();
+        osc.stop(this.ctx.currentTime + 0.15);
+    }
+
+    playGameOver() {
+        if (!this.ctx) return;
+        const notes = [400, 350, 300, 200];
+        notes.forEach((freq, i) => {
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+            osc.connect(gain);
+            gain.connect(this.ctx.destination);
+            osc.frequency.value = freq;
+            osc.type = 'triangle';
+            const t = this.ctx.currentTime + i * 0.15;
+            gain.gain.setValueAtTime(0.12, t);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+            osc.start(t);
+            osc.stop(t + 0.3);
+        });
+    }
+}
+
+const soundManager = new SoundManager();
+
+// ============================================================
+// MAIN GAME SCENE
+// ============================================================
+class GameScene extends Phaser.Scene {
+    constructor() {
+        super({ key: 'GameScene' });
+        this.score = 0;
+        this.highScore = parseInt(localStorage.getItem('crystalCascadeHS') || '0');
+        this.chainMultiplier = 1;
+        this.chainTimer = 0;
+        this.crystals = [];
+        this.canDrop = true;
+        this.dropCooldown = 0;
+        this.autoDropTimer = 0;
+        this.nextSize = 0;
+        this.gameOver = false;
+        this.aimX = GAME_W / 2;
+        this.isDragging = false;
+        this.mergeCount = 0;
+        this.perfectCascade = false;
+        this.waterOffset = 0;
+        this.shakeIntensity = 0;
+        this.slowMoTimer = 0;
+        this.milestoneUnlocked = 1; // max initial drop size
+    }
+
+    preload() {
+        // Generate all crystal textures procedurally
+        this.generateCrystalTextures();
+        this.generateParticleTexture();
+        this.generateGlowTexture();
+    }
+
+    generateCrystalTextures() {
+        for (let size = 1; size <= CRYSTAL_SIZES; size++) {
+            const radius = getCrystalRadius(size);
+            const d = Math.ceil(radius * 2 + 8);
+            const key = 'crystal_' + size;
+
+            const canvas = document.createElement('canvas');
+            canvas.width = d;
+            canvas.height = d;
+            const ctx = canvas.getContext('2d');
+            const cx = d / 2;
+            const cy = d / 2;
+
+            // Outer glow
+            const glowGrad = ctx.createRadialGradient(cx, cy, radius * 0.5, cx, cy, radius + 3);
+            const color = hexToRgb(CRYSTAL_COLORS[size - 1]);
+            glowGrad.addColorStop(0, `rgba(${color.r},${color.g},${color.b},0.9)`);
+            glowGrad.addColorStop(0.7, `rgba(${color.r},${color.g},${color.b},0.4)`);
+            glowGrad.addColorStop(1, `rgba(${color.r},${color.g},${color.b},0)`);
+            ctx.fillStyle = glowGrad;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius + 3, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Main body gradient
+            const bodyGrad = ctx.createRadialGradient(cx - radius * 0.25, cy - radius * 0.25, 0, cx, cy, radius);
+            bodyGrad.addColorStop(0, `rgba(255,255,255,0.95)`);
+            bodyGrad.addColorStop(0.3, `rgba(${color.r},${color.g},${color.b},0.9)`);
+            bodyGrad.addColorStop(0.85, `rgba(${Math.max(0, color.r - 60)},${Math.max(0, color.g - 60)},${Math.max(0, color.b - 60)},0.95)`);
+            bodyGrad.addColorStop(1, `rgba(${Math.max(0, color.r - 100)},${Math.max(0, color.g - 100)},${Math.max(0, color.b - 100)},1)`);
+            ctx.fillStyle = bodyGrad;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Highlight
+            ctx.fillStyle = 'rgba(255,255,255,0.35)';
+            ctx.beginPath();
+            ctx.ellipse(cx - radius * 0.2, cy - radius * 0.3, radius * 0.35, radius * 0.2, -0.4, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Size number
+            if (size <= 9) {
+                ctx.fillStyle = 'rgba(255,255,255,0.8)';
+                ctx.font = `bold ${Math.max(10, radius * 0.7)}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(String(Math.pow(2, size - 1)), cx, cy + 1);
+            } else {
+                ctx.fillStyle = 'rgba(255,255,255,0.9)';
+                ctx.font = `bold ${radius * 0.5}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('512', cx, cy + 1);
+            }
+
+            this.textures.addCanvas(key, canvas);
+        }
+    }
+
+    generateParticleTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 16;
+        canvas.height = 16;
+        const ctx = canvas.getContext('2d');
+        const grad = ctx.createRadialGradient(8, 8, 0, 8, 8, 8);
+        grad.addColorStop(0, 'rgba(255,255,255,1)');
+        grad.addColorStop(0.5, 'rgba(255,255,200,0.6)');
+        grad.addColorStop(1, 'rgba(255,200,100,0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, 16, 16);
+        this.textures.addCanvas('particle', canvas);
+    }
+
+    generateGlowTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 64;
+        canvas.height = 64;
+        const ctx = canvas.getContext('2d');
+        const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+        grad.addColorStop(0, 'rgba(255,255,255,0.5)');
+        grad.addColorStop(0.5, 'rgba(100,200,255,0.2)');
+        grad.addColorStop(1, 'rgba(0,50,100,0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, 64, 64);
+        this.textures.addCanvas('glow', canvas);
+    }
+
+    create() {
+        soundManager.init();
+        this.cameras.main.setBackgroundColor(0x001122);
+
+        // Waterfall background layer
+        this.waterBg = this.add.graphics();
+        this.drawWaterfall();
+
+        // Drop zone indicator
+        this.dropZoneGfx = this.add.graphics();
+        this.dropZoneGfx.setDepth(1);
+
+        // Matter world bounds
+        this.setupWalls();
+
+        // Aim indicator
+        this.aimLine = this.add.graphics();
+        this.aimLine.setDepth(10);
+
+        // Preview crystal
+        this.previewSprite = null;
+
+        // UI
+        this.createUI();
+
+        // Input
+        this.setupInput();
+
+        // Collision handler
+        this.matter.world.on('collisionstart', (event) => {
+            this.handleCollisions(event);
+        });
+
+        // Pick first crystal
+        this.nextSize = this.getRandomDropSize();
+        this.updatePreview();
+
+        // Auto-drop timer
+        this.autoDropTimer = 4000;
+
+        console.log('Crystal Cascade initialized!');
+        console.log('Controls: Mouse/Touch drag to aim, release to drop. Arrow keys + Space.');
+    }
+
+    setupWalls() {
+        const wallOptions = {
+            isStatic: true,
+            friction: 0.3,
+            restitution: 0.05,
+            label: 'wall'
+        };
+
+        // Left wall
+        this.matter.add.rectangle(
+            -WALL_THICKNESS / 2, GAME_H / 2,
+            WALL_THICKNESS, GAME_H * 2,
+            wallOptions
+        );
+
+        // Right wall
+        this.matter.add.rectangle(
+            GAME_W + WALL_THICKNESS / 2, GAME_H / 2,
+            WALL_THICKNESS, GAME_H * 2,
+            wallOptions
+        );
+
+        // Sloped riverbed floor - V-shape for avalanche flow
+        const floorVerts = [
+            { x: -100, y: 0 },
+            { x: GAME_W + 100, y: 0 },
+            { x: GAME_W + 100, y: 80 },
+            { x: GAME_W / 2, y: 30 },
+            { x: -100, y: 80 },
+        ];
+        this.matter.add.fromVertices(
+            GAME_W / 2, FLOOR_Y + 30,
+            floorVerts,
+            { isStatic: true, friction: 0.5, restitution: 0.02, label: 'floor' }
+        );
+
+        // Extra floor safety net
+        this.matter.add.rectangle(
+            GAME_W / 2, GAME_H + 20,
+            GAME_W + 200, 40,
+            wallOptions
+        );
+    }
+
+    createUI() {
+        this.uiContainer = this.add.container(0, 0).setDepth(100);
+
+        // Score background bar
+        const uiBg = this.add.graphics();
+        uiBg.fillStyle(0x000000, 0.6);
+        uiBg.fillRect(0, 0, GAME_W, 52);
+        this.uiContainer.add(uiBg);
+
+        // Drop zone line
+        const dzLine = this.add.graphics();
+        dzLine.lineStyle(2, 0xff4444, 0.4);
+        dzLine.lineBetween(0, DROP_ZONE_Y, GAME_W, DROP_ZONE_Y);
+        this.uiContainer.add(dzLine);
+
+        // Drop zone label
+        const dzLabel = this.add.text(GAME_W / 2, DROP_ZONE_Y + 8, '— DANGER ZONE —', {
+            fontSize: '12px', fontFamily: 'Arial', color: '#ff4444', align: 'center'
+        }).setOrigin(0.5, 0).setAlpha(0.4);
+        this.uiContainer.add(dzLabel);
+
+        this.scoreText = this.add.text(15, 8, 'Score: 0', {
+            fontSize: '22px', fontFamily: 'Arial', color: '#ffffff',
+            fontStyle: 'bold', stroke: '#000000', strokeThickness: 3
+        });
+        this.uiContainer.add(this.scoreText);
+
+        this.highScoreText = this.add.text(GAME_W - 15, 8, 'Best: ' + this.highScore, {
+            fontSize: '18px', fontFamily: 'Arial', color: '#88ccff',
+            fontStyle: 'bold', stroke: '#000000', strokeThickness: 2
+        }).setOrigin(1, 0);
+        this.uiContainer.add(this.highScoreText);
+
+        this.multText = this.add.text(GAME_W / 2, 8, '', {
+            fontSize: '20px', fontFamily: 'Arial', color: '#ffdd44',
+            fontStyle: 'bold', stroke: '#000000', strokeThickness: 3
+        }).setOrigin(0.5, 0);
+        this.uiContainer.add(this.multText);
+
+        this.nextText = this.add.text(GAME_W / 2, 34, '', {
+            fontSize: '13px', fontFamily: 'Arial', color: '#aaaacc',
+            stroke: '#000000', strokeThickness: 2
+        }).setOrigin(0.5, 0);
+        this.uiContainer.add(this.nextText);
+    }
+
+    setupInput() {
+        // Pointer (mouse/touch)
+        this.input.on('pointerdown', (pointer) => {
+            if (this.gameOver) return;
+            soundManager.init();
+            this.isDragging = true;
+            this.aimX = Phaser.Math.Clamp(pointer.x, 40, GAME_W - 40);
+        });
+
+        this.input.on('pointermove', (pointer) => {
+            if (!this.isDragging || this.gameOver) return;
+            this.aimX = Phaser.Math.Clamp(pointer.x, 40, GAME_W - 40);
+        });
+
+        this.input.on('pointerup', () => {
+            if (this.gameOver) return;
+            if (this.isDragging && this.canDrop) {
+                this.dropCrystal(this.aimX);
+            }
+            this.isDragging = false;
+        });
+
+        // Keyboard
+        this.cursors = this.input.keyboard.createCursorKeys();
+        this.spaceKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+        this.spaceKey.on('down', () => {
+            if (this.gameOver) return;
+            soundManager.init();
+            if (this.canDrop) {
+                this.dropCrystal(this.aimX);
+            }
+        });
+    }
+
+    getRandomDropSize() {
+        // Weighted random: smaller crystals more common
+        const maxDrop = Math.min(4, this.milestoneUnlocked);
+        const weights = [];
+        for (let i = 1; i <= maxDrop; i++) {
+            weights.push(Math.pow(0.45, i - 1));
+        }
+        const totalW = weights.reduce((a, b) => a + b, 0);
+        let r = Math.random() * totalW;
+        for (let i = 0; i < weights.length; i++) {
+            r -= weights[i];
+            if (r <= 0) return i + 1;
+        }
+        return 1;
+    }
+
+    updatePreview() {
+        if (this.previewSprite) {
+            this.previewSprite.destroy();
+        }
+        this.previewSprite = this.add.image(this.aimX, DROP_ZONE_Y * 0.5, 'crystal_' + this.nextSize);
+        this.previewSprite.setAlpha(0.7);
+        this.previewSprite.setDepth(11);
+        this.nextText.setText('Next: ' + CRYSTAL_NAMES[this.nextSize - 1]);
+    }
+
+    dropCrystal(x) {
+        if (!this.canDrop || this.gameOver) return;
+
+        const size = this.nextSize;
+        const radius = getCrystalRadius(size);
+
+        // Add slight random variance
+        x += (Math.random() - 0.5) * 10;
+        x = Phaser.Math.Clamp(x, radius + 5, GAME_W - radius - 5);
+
+        const body = this.matter.add.circle(x, DROP_ZONE_Y * 0.5, radius, {
+            restitution: 0.1,
+            friction: 0.15,
+            frictionAir: 0.001,
+            density: 0.001 * size,
+            label: 'crystal',
+            circleRadius: radius,
+        });
+
+        body.crystalSize = size;
+        body.crystalId = Date.now() + Math.random();
+        body.merging = false;
+        body.justDropped = true;
+
+        const sprite = this.add.image(x, DROP_ZONE_Y * 0.5, 'crystal_' + size);
+        sprite.setDepth(5);
+        body.sprite = sprite;
+
+        this.crystals.push(body);
+
+        // Cooldown
+        this.canDrop = false;
+        this.dropCooldown = 500;
+        this.autoDropTimer = 4000;
+
+        // Next crystal
+        this.nextSize = this.getRandomDropSize();
+        this.updatePreview();
+
+        soundManager.playDrop();
+
+        // Clear justDropped after a delay so it can merge
+        this.time.delayedCall(300, () => {
+            if (body) body.justDropped = false;
+        });
+
+        console.log(`Dropped size ${size} crystal at x=${Math.round(x)}`);
+    }
+
+    handleCollisions(event) {
+        const pairs = event.pairs;
+        const toMerge = [];
+
+        for (let i = 0; i < pairs.length; i++) {
+            const { bodyA, bodyB } = pairs[i];
+
+            if (bodyA.label !== 'crystal' || bodyB.label !== 'crystal') continue;
+            if (bodyA.merging || bodyB.merging) continue;
+            if (bodyA.justDropped || bodyB.justDropped) continue;
+            if (bodyA.crystalSize !== bodyB.crystalSize) continue;
+            if (bodyA.crystalSize >= CRYSTAL_SIZES) continue;
+
+            // Velocity threshold check - skip very fast collisions
+            const relVx = bodyA.velocity.x - bodyB.velocity.x;
+            const relVy = bodyA.velocity.y - bodyB.velocity.y;
+            const relSpeed = Math.sqrt(relVx * relVx + relVy * relVy);
+            if (relSpeed > 15) continue;
+
+            bodyA.merging = true;
+            bodyB.merging = true;
+            toMerge.push({ a: bodyA, b: bodyB });
+        }
+
+        for (const pair of toMerge) {
+            this.mergeCrystals(pair.a, pair.b);
+        }
+    }
+
+    mergeCrystals(bodyA, bodyB) {
+        const size = bodyA.crystalSize;
+        const newSize = size + 1;
+
+        // Position: midpoint
+        const mx = (bodyA.position.x + bodyB.position.x) / 2;
+        const my = (bodyA.position.y + bodyB.position.y) / 2;
+
+        // Conserve momentum
+        const vx = (bodyA.velocity.x + bodyB.velocity.x) * 0.5;
+        const vy = (bodyA.velocity.y + bodyB.velocity.y) * 0.5;
+
+        // Destroy old
+        this.removeCrystal(bodyA);
+        this.removeCrystal(bodyB);
+
+        // Create new merged crystal
+        const radius = getCrystalRadius(newSize);
+        const newBody = this.matter.add.circle(mx, my, radius, {
+            restitution: 0.1,
+            friction: 0.15,
+            frictionAir: 0.001,
+            density: 0.001 * newSize,
+            label: 'crystal',
+            circleRadius: radius,
+        });
+
+        newBody.crystalSize = newSize;
+        newBody.crystalId = Date.now() + Math.random();
+        newBody.merging = false;
+        newBody.justDropped = false;
+
+        // Apply conserved velocity + small upward impulse
+        this.matter.body.setVelocity(newBody, { x: vx, y: vy - 1 });
+
+        const sprite = this.add.image(mx, my, 'crystal_' + newSize);
+        sprite.setDepth(5);
+        sprite.setScale(0.3);
+        this.tweens.add({
+            targets: sprite,
+            scaleX: 1,
+            scaleY: 1,
+            duration: 200,
+            ease: 'Back.easeOut'
+        });
+        newBody.sprite = sprite;
+
+        this.crystals.push(newBody);
+
+        // Chain multiplier
+        this.chainMultiplier = Math.min(10, this.chainMultiplier + 0.5);
+        this.chainTimer = 2000;
+        this.mergeCount++;
+
+        // Score
+        const points = Math.round(Math.pow(2, size) * this.chainMultiplier);
+        this.score += points;
+
+        // Milestone unlocks
+        if (this.score >= 500) this.milestoneUnlocked = 2;
+        if (this.score >= 2000) this.milestoneUnlocked = 3;
+        if (this.score >= 8000) this.milestoneUnlocked = 4;
+
+        // Perfect cascade badge
+        if (this.score >= 100000 && !this.perfectCascade) {
+            this.perfectCascade = true;
+            this.showBadge('PERFECT CASCADE!');
+        }
+
+        // Effects
+        this.spawnMergeParticles(mx, my, newSize);
+        this.showScorePopup(mx, my, points);
+        this.shakeIntensity = Math.min(8, newSize * 1.2);
+        soundManager.playMergePing(newSize);
+
+        // Big merge slow-mo
+        if (this.chainMultiplier >= 5 || newSize >= 7) {
+            this.slowMoTimer = 500;
+            this.time.timeScale = 0.3;
+            soundManager.playExplosion(newSize / CRYSTAL_SIZES);
+        }
+
+        // Nuclear merge announcement
+        if (newSize >= 8) {
+            this.showBadge('NUCLEAR!');
+        }
+
+        this.updateScoreDisplay();
+
+        console.log(`Merge! Size ${size}+${size} → ${newSize} | Chain: x${this.chainMultiplier.toFixed(1)} | +${points}`);
+    }
+
+    removeCrystal(body) {
+        if (body.sprite) {
+            body.sprite.destroy();
+            body.sprite = null;
+        }
+        const idx = this.crystals.indexOf(body);
+        if (idx >= 0) this.crystals.splice(idx, 1);
+        this.matter.world.remove(body);
+    }
+
+    spawnMergeParticles(x, y, size) {
+        const count = Math.min(80, 15 + size * 8);
+        const color = CRYSTAL_COLORS[Math.min(size - 1, CRYSTAL_SIZES - 1)];
+        const rgb = hexToRgb(color);
+
+        for (let i = 0; i < count; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const speed = 50 + Math.random() * 150 * (size / 3);
+            const pSize = 3 + Math.random() * 6;
+
+            const p = this.add.circle(x, y, pSize, color, 0.9);
+            p.setDepth(20);
+
+            this.tweens.add({
+                targets: p,
+                x: x + Math.cos(angle) * speed,
+                y: y + Math.sin(angle) * speed - 30,
+                alpha: 0,
+                scaleX: 0.1,
+                scaleY: 0.1,
+                duration: 400 + Math.random() * 300,
+                ease: 'Power2',
+                onComplete: () => p.destroy()
+            });
+        }
+
+        // Rainbow ring for big merges
+        if (size >= 5) {
+            const ring = this.add.circle(x, y, 5, 0xffffff, 0.6);
+            ring.setDepth(19);
+            ring.setStrokeStyle(3, color);
+            this.tweens.add({
+                targets: ring,
+                scaleX: size * 3,
+                scaleY: size * 3,
+                alpha: 0,
+                duration: 500,
+                ease: 'Power2',
+                onComplete: () => ring.destroy()
+            });
+        }
+    }
+
+    showScorePopup(x, y, points) {
+        const colors = ['#ffffff', '#ffdd44', '#ff8844', '#ff44ff', '#44ffff'];
+        const colorIdx = Math.min(colors.length - 1, Math.floor(this.chainMultiplier / 2));
+
+        const text = this.add.text(x, y, '+' + points, {
+            fontSize: Math.min(36, 16 + this.chainMultiplier * 3) + 'px',
+            fontFamily: 'Arial',
+            color: colors[colorIdx],
+            fontStyle: 'bold',
+            stroke: '#000000',
+            strokeThickness: 3
+        }).setOrigin(0.5).setDepth(50);
+
+        if (this.chainMultiplier > 2) {
+            const multLabel = this.add.text(x, y + 22, 'x' + this.chainMultiplier.toFixed(1), {
+                fontSize: '14px',
+                fontFamily: 'Arial',
+                color: '#ffdd44',
+                fontStyle: 'bold',
+                stroke: '#000000',
+                strokeThickness: 2
+            }).setOrigin(0.5).setDepth(50);
+
+            this.tweens.add({
+                targets: multLabel,
+                y: y - 30,
+                alpha: 0,
+                duration: 800,
+                ease: 'Power2',
+                onComplete: () => multLabel.destroy()
+            });
+        }
+
+        this.tweens.add({
+            targets: text,
+            y: y - 60,
+            alpha: 0,
+            duration: 800,
+            ease: 'Power2',
+            onComplete: () => text.destroy()
+        });
+    }
+
+    showBadge(label) {
+        const badge = this.add.text(GAME_W / 2, GAME_H / 2, label, {
+            fontSize: '48px',
+            fontFamily: 'Arial',
+            color: '#ffdd44',
+            fontStyle: 'bold',
+            stroke: '#000000',
+            strokeThickness: 6,
+            shadow: { offsetX: 2, offsetY: 2, color: '#ff8800', blur: 10, fill: true }
+        }).setOrigin(0.5).setDepth(200).setScale(0.1);
+
+        this.tweens.add({
+            targets: badge,
+            scaleX: 1.3,
+            scaleY: 1.3,
+            duration: 300,
+            ease: 'Back.easeOut',
+            yoyo: true,
+            hold: 600,
+            onComplete: () => {
+                this.tweens.add({
+                    targets: badge,
+                    alpha: 0,
+                    y: badge.y - 50,
+                    duration: 400,
+                    onComplete: () => badge.destroy()
+                });
+            }
+        });
+    }
+
+    updateScoreDisplay() {
+        this.scoreText.setText('Score: ' + this.score);
+        if (this.score > this.highScore) {
+            this.highScore = this.score;
+            localStorage.setItem('crystalCascadeHS', String(this.highScore));
+            this.highScoreText.setText('Best: ' + this.highScore);
+            this.highScoreText.setColor('#ffdd44');
+        }
+        if (this.chainMultiplier > 1) {
+            this.multText.setText('x' + this.chainMultiplier.toFixed(1));
+            this.multText.setAlpha(1);
+        }
+    }
+
+    drawWaterfall() {
+        this.waterBg.clear();
+        const t = this.waterOffset;
+
+        // Gradient background
+        for (let y = 0; y < GAME_H; y += 4) {
+            const depth = y / GAME_H;
+            const r = Math.floor(0 + depth * 10);
+            const g = Math.floor(12 + depth * 20 + Math.sin(y * 0.02 + t * 0.5) * 8);
+            const b = Math.floor(30 + depth * 40 + Math.sin(y * 0.015 + t * 0.3) * 12);
+            this.waterBg.fillStyle(Phaser.Display.Color.GetColor(r, g, b), 1);
+            this.waterBg.fillRect(0, y, GAME_W, 4);
+        }
+
+        // Water streaks
+        this.waterBg.setAlpha(0.15);
+        for (let i = 0; i < 20; i++) {
+            const x = (i * 47 + Math.sin(t * 0.4 + i) * 30) % GAME_W;
+            const yStart = ((t * 80 + i * 137) % (GAME_H + 200)) - 100;
+            const len = 60 + Math.sin(i * 2.3) * 40;
+            this.waterBg.lineStyle(1 + Math.random(), 0x4488cc, 0.3);
+            this.waterBg.lineBetween(x, yStart, x + Math.sin(t + i) * 5, yStart + len);
+        }
+
+        // Foam/bubble dots
+        for (let i = 0; i < 30; i++) {
+            const bx = (i * 31 + Math.sin(t * 0.6 + i * 1.7) * 20) % GAME_W;
+            const by = ((t * 50 + i * 97) % (GAME_H + 100)) - 50;
+            const bs = 1 + Math.sin(t * 2 + i) * 0.5;
+            this.waterBg.fillStyle(0x88ccff, 0.2 + Math.sin(t * 3 + i * 2) * 0.1);
+            this.waterBg.fillCircle(bx, by, bs);
+        }
+        this.waterBg.setAlpha(1);
+    }
+
+    checkGameOver() {
+        for (const body of this.crystals) {
+            if (body.justDropped || body.merging) continue;
+            if (body.position.y - getCrystalRadius(body.crystalSize) < DROP_ZONE_Y) {
+                // Check if it's been above the line for a bit (settled)
+                if (!body.dangerTimer) {
+                    body.dangerTimer = 0;
+                }
+                body.dangerTimer += 16;
+                if (body.dangerTimer > 1500) {
+                    this.triggerGameOver();
+                    return;
+                }
+            } else {
+                body.dangerTimer = 0;
+            }
+        }
+    }
+
+    triggerGameOver() {
+        if (this.gameOver) return;
+        this.gameOver = true;
+        console.log('Game Over! Final score: ' + this.score);
+        soundManager.playGameOver();
+
+        // Darken overlay
+        const overlay = this.add.rectangle(GAME_W / 2, GAME_H / 2, GAME_W, GAME_H, 0x000000, 0);
+        overlay.setDepth(150);
+        this.tweens.add({
+            targets: overlay,
+            fillAlpha: 0.7,
+            duration: 800
+        });
+
+        // Game over text
+        const goText = this.add.text(GAME_W / 2, GAME_H * 0.35, 'GAME OVER', {
+            fontSize: '56px', fontFamily: 'Arial', color: '#ff4444',
+            fontStyle: 'bold', stroke: '#000000', strokeThickness: 6
+        }).setOrigin(0.5).setDepth(200);
+
+        this.add.text(GAME_W / 2, GAME_H * 0.43, 'Score: ' + this.score, {
+            fontSize: '36px', fontFamily: 'Arial', color: '#ffffff',
+            fontStyle: 'bold', stroke: '#000000', strokeThickness: 4
+        }).setOrigin(0.5).setDepth(200);
+
+        if (this.score >= this.highScore) {
+            this.add.text(GAME_W / 2, GAME_H * 0.49, 'NEW HIGH SCORE!', {
+                fontSize: '24px', fontFamily: 'Arial', color: '#ffdd44',
+                fontStyle: 'bold', stroke: '#000000', strokeThickness: 3
+            }).setOrigin(0.5).setDepth(200);
+        }
+
+        this.add.text(GAME_W / 2, GAME_H * 0.55, 'Best: ' + this.highScore, {
+            fontSize: '24px', fontFamily: 'Arial', color: '#88ccff',
+            stroke: '#000000', strokeThickness: 3
+        }).setOrigin(0.5).setDepth(200);
+
+        // Play Again button
+        const btnBg = this.add.rectangle(GAME_W / 2, GAME_H * 0.65, 240, 60, 0x44aa44, 1);
+        btnBg.setDepth(200);
+        btnBg.setStrokeStyle(3, 0x66dd66);
+        btnBg.setInteractive({ useHandCursor: true });
+
+        const btnText = this.add.text(GAME_W / 2, GAME_H * 0.65, 'PLAY AGAIN', {
+            fontSize: '28px', fontFamily: 'Arial', color: '#ffffff',
+            fontStyle: 'bold'
+        }).setOrigin(0.5).setDepth(201);
+
+        btnBg.on('pointerover', () => btnBg.setFillStyle(0x55cc55));
+        btnBg.on('pointerout', () => btnBg.setFillStyle(0x44aa44));
+        btnBg.on('pointerup', () => {
+            this.scene.restart();
+        });
+
+        // Share button
+        const shareBg = this.add.rectangle(GAME_W / 2, GAME_H * 0.73, 240, 50, 0x4466aa, 1);
+        shareBg.setDepth(200);
+        shareBg.setStrokeStyle(3, 0x6688cc);
+        shareBg.setInteractive({ useHandCursor: true });
+
+        this.add.text(GAME_W / 2, GAME_H * 0.73, 'SHARE SCORE', {
+            fontSize: '22px', fontFamily: 'Arial', color: '#ffffff',
+            fontStyle: 'bold'
+        }).setOrigin(0.5).setDepth(201);
+
+        shareBg.on('pointerover', () => shareBg.setFillStyle(0x5577bb));
+        shareBg.on('pointerout', () => shareBg.setFillStyle(0x4466aa));
+        shareBg.on('pointerup', () => {
+            if (navigator.share) {
+                navigator.share({
+                    text: `I scored ${this.score} in Crystal Cascade! Can you beat me?`,
+                    url: window.location.href
+                }).catch(() => {});
+            } else {
+                // Fallback: copy to clipboard
+                const shareText = `I scored ${this.score} in Crystal Cascade! Can you beat me? ${window.location.href}`;
+                navigator.clipboard.writeText(shareText).then(() => {
+                    btnText.setText('Copied!');
+                    this.time.delayedCall(1500, () => btnText.setText('PLAY AGAIN'));
+                }).catch(() => {});
+            }
+        });
+    }
+
+    update(time, delta) {
+        if (this.gameOver) return;
+
+        const dt = Math.min(delta, 33); // Cap delta
+
+        // Slow-mo timer
+        if (this.slowMoTimer > 0) {
+            this.slowMoTimer -= delta;
+            if (this.slowMoTimer <= 0) {
+                this.time.timeScale = 1;
+                this.slowMoTimer = 0;
+            }
+        }
+
+        // Chain multiplier decay
+        if (this.chainTimer > 0) {
+            this.chainTimer -= dt;
+            if (this.chainTimer <= 0) {
+                this.chainMultiplier = 1;
+                this.multText.setAlpha(0);
+            }
+        }
+
+        // Drop cooldown
+        if (!this.canDrop) {
+            this.dropCooldown -= dt;
+            if (this.dropCooldown <= 0) {
+                this.canDrop = true;
+            }
+        }
+
+        // Auto-drop timer
+        if (this.canDrop && !this.isDragging) {
+            this.autoDropTimer -= dt;
+            if (this.autoDropTimer <= 0) {
+                this.dropCrystal(this.aimX);
+            }
+        }
+
+        // Keyboard aim
+        if (this.cursors.left.isDown) {
+            this.aimX = Phaser.Math.Clamp(this.aimX - 5, 40, GAME_W - 40);
+        }
+        if (this.cursors.right.isDown) {
+            this.aimX = Phaser.Math.Clamp(this.aimX + 5, 40, GAME_W - 40);
+        }
+
+        // Update preview position
+        if (this.previewSprite) {
+            this.previewSprite.x = this.aimX;
+        }
+
+        // Aim line
+        this.aimLine.clear();
+        if (this.canDrop) {
+            this.aimLine.lineStyle(1, 0xffffff, 0.25);
+            // Dashed line effect
+            for (let y = DROP_ZONE_Y * 0.5 + 20; y < FLOOR_Y; y += 12) {
+                this.aimLine.lineBetween(this.aimX, y, this.aimX, Math.min(y + 6, FLOOR_Y));
+            }
+        }
+
+        // Update crystal sprites to match physics bodies
+        for (const body of this.crystals) {
+            if (body.sprite) {
+                body.sprite.x = body.position.x;
+                body.sprite.y = body.position.y;
+                body.sprite.rotation = body.angle;
+
+                // Shimmer pulse
+                const pulse = 0.9 + Math.sin(time * 0.003 + body.crystalId * 10) * 0.1;
+                body.sprite.setAlpha(pulse);
+            }
+        }
+
+        // Waterfall animation
+        this.waterOffset += dt * 0.001;
+        if (Math.floor(time / 100) % 3 === 0) {
+            this.drawWaterfall();
+        }
+
+        // Screen shake
+        if (this.shakeIntensity > 0) {
+            const sx = (Math.random() - 0.5) * this.shakeIntensity;
+            const sy = (Math.random() - 0.5) * this.shakeIntensity;
+            this.cameras.main.setScroll(sx, sy);
+            this.shakeIntensity *= 0.9;
+            if (this.shakeIntensity < 0.5) {
+                this.shakeIntensity = 0;
+                this.cameras.main.setScroll(0, 0);
+            }
+        }
+
+        // Game over check
+        this.checkGameOver();
+
+        // Clean up any bodies that fell out of bounds
+        for (let i = this.crystals.length - 1; i >= 0; i--) {
+            const b = this.crystals[i];
+            if (b.position.y > GAME_H + 100 || b.position.x < -100 || b.position.x > GAME_W + 100) {
+                this.removeCrystal(b);
+            }
+        }
+    }
+}
+
+// ============================================================
+// PHASER CONFIG
+// ============================================================
+const config = {
+    type: Phaser.WEBGL,
+    width: GAME_W,
+    height: GAME_H,
+    backgroundColor: '#001122',
+    parent: document.body,
+    scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH
+    },
+    physics: {
+        default: 'matter',
+        matter: {
+            debug: false,
+            gravity: { y: 1.2 },
+            enableSleeping: true,
+        }
+    },
+    scene: GameScene,
+    fps: {
+        target: 60,
+        forceSetTimeOut: false
+    },
+    input: {
+        activePointers: 2,
+        touch: { capture: true }
+    },
+    audio: {
+        noAudio: true // We use Web Audio directly
+    }
+};
+
+const game = new Phaser.Game(config);
+
+console.log('Crystal Cascade loaded! Enjoy the game.');
+// Poki SDK integration point:
+// PokiSDK.init().then(() => { PokiSDK.gameLoadingFinished(); });
+// PokiSDK.commercialBreak() on game over
+// PokiSDK.rewardedBreak() for power-ups
+</script>
+</body>
+</html>
