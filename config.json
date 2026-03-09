@@ -1,0 +1,28 @@
+{
+  "search_queries": [
+    "entreprise de nettoyage",
+    "société de nettoyage",
+    "nettoyage industriel",
+    "nettoyage professionnel",
+    "entreprise de propreté",
+    "société de propreté",
+    "nettoyage de bureaux",
+    "nettoyage de locaux",
+    "entreprise entretien ménager",
+    "nettoyage vitrerie professionnel"
+  ],
+  "regions": [
+    "Île-de-France", "Paris", "Lyon", "Marseille", "Toulouse",
+    "Bordeaux", "Lille", "Nantes", "Strasbourg", "Nice",
+    "Montpellier", "Rennes", "Grenoble", "Rouen", "Toulon",
+    "Saint-Étienne", "Dijon", "Angers", "Nîmes", "Clermont-Ferrand",
+    "Le Havre", "Reims", "Metz", "Orléans", "Amiens",
+    "Caen", "Limoges", "Tours", "Besançon", "Perpignan"
+  ],
+  "max_results_per_query": 50,
+  "request_delay_min": 2,
+  "request_delay_max": 5,
+  "max_concurrent_crawls": 3,
+  "output_file": "output/entreprises_nettoyage.csv",
+  "crawl_depth": 2
+}
