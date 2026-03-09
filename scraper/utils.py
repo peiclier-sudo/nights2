@@ -30,11 +30,41 @@ HEADERS_BASE = {
 
 # Selenium driver singleton
 _driver = None
+_selenium_failed = False  # Cache failure to avoid retrying every request
+
+
+def _make_browser_options(browser_type="chrome"):
+    """Create browser options for anti-detection."""
+    if browser_type == "edge":
+        from selenium.webdriver.edge.options import Options
+    else:
+        from selenium.webdriver.chrome.options import Options
+
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--lang=fr-FR")
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    )
+    if browser_type == "chrome":
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+    return options
 
 
 def get_selenium_driver():
-    """Get or create a Selenium Chrome driver (headless)."""
-    global _driver
+    """Get or create a Selenium driver (tries Edge first on Windows, then Chrome)."""
+    global _driver, _selenium_failed
+
+    # Don't retry if we already failed
+    if _selenium_failed:
+        return None
+
     if _driver is not None:
         try:
             _driver.current_url  # check if still alive
@@ -42,40 +72,41 @@ def get_selenium_driver():
         except Exception:
             _driver = None
 
+    # Try Edge first (pre-installed on Windows)
     try:
         from selenium import webdriver
-        from selenium.webdriver.chrome.service import Service
-        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.edge.service import Service as EdgeService
+        from webdriver_manager.microsoft import EdgeChromiumDriverManager
+
+        options = _make_browser_options("edge")
+        service = EdgeService(EdgeChromiumDriverManager().install())
+        _driver = webdriver.Edge(service=service, options=options)
+        _driver.set_page_load_timeout(20)
+        logger.info("Selenium Edge driver initialized")
+        return _driver
+    except Exception as e:
+        logger.debug(f"Edge driver failed: {e}")
+
+    # Try Chrome
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service as ChromeService
         from webdriver_manager.chrome import ChromeDriverManager
 
-        options = Options()
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument("--lang=fr-FR")
-        options.add_argument(
-            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
-
-        service = Service(ChromeDriverManager().install())
+        options = _make_browser_options("chrome")
+        service = ChromeService(ChromeDriverManager().install())
         _driver = webdriver.Chrome(service=service, options=options)
 
-        # Remove webdriver flag
         _driver.execute_cdp_cmd(
             "Page.addScriptToEvaluateOnNewDocument",
             {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
         )
         _driver.set_page_load_timeout(20)
-
         logger.info("Selenium Chrome driver initialized")
         return _driver
     except Exception as e:
-        logger.error(f"Failed to initialize Selenium driver: {e}")
+        logger.warning(f"No browser found for Selenium (Chrome/Edge). Falling back to requests only. Error: {e}")
+        _selenium_failed = True
         return None
 
 
